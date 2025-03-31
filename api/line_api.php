@@ -7,26 +7,68 @@ include_once __DIR__ . '/log_api.php';
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-// Request handling
-$method = $_SERVER['REQUEST_METHOD'];
-$ip_address = $_SERVER['REMOTE_ADDR'] ?? null;
-$user_agent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-
-// Response helper function
+// Response helper function with integrated logging
 function sendResponse($status, $message, $data = null, $httpCode = 200) {
-    http_response_code($httpCode);
-    echo json_encode([
+    global $conn;
+    
+    $response = [
         'status' => $status,
         'message' => $message,
         'data' => $data
-    ]);
+    ];
+    
+    http_response_code($httpCode);
+    
+    // Log the API request
+    logUserAction(
+        isset($_SESSION['user_id']) ? $_SESSION['user_id'] : null,
+        isset($_SESSION['username']) ? $_SESSION['username'] : 'API_USER',
+        "LINE_API_" . strtoupper($_SERVER['REQUEST_METHOD']),
+        $message,
+        $_SERVER['REQUEST_URI'],
+        $_SERVER['REQUEST_METHOD'],
+        json_decode(file_get_contents("php://input"), true),
+        $status,
+        $response,
+        $_SERVER['REMOTE_ADDR'],
+        $_SERVER['HTTP_USER_AGENT']
+    );
+    
+    echo json_encode($response);
     exit;
 }
 
-// Logging helper
-function logAction($action, $type, $ip, $agent, $details = []) {
-    logUserAction(null, 'system', $type, $action, $_SERVER['REQUEST_URI'], 
-                 $_SERVER['REQUEST_METHOD'], $details, $ip, $agent);
+try {
+    // Get the request method
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    switch ($method) {
+        case 'POST': 
+            createLine($conn); 
+            break;
+        case 'GET':
+            if (isset($_GET['validate_dcm_zone'])) {
+                validateDcmZoneEndpoint($conn);
+            } else {
+                isset($_GET['line_id']) ? getLine($conn) : listLines($conn);
+            }
+            break;
+        case 'PUT': 
+            updateLine($conn); 
+            break;
+        case 'DELETE': 
+            deleteLine($conn); 
+            break;
+        default:
+            sendResponse('error', 'Invalid request method', null, 405);
+            break;
+    }
+} catch (Exception $e) {
+    sendResponse('error', 'An unexpected error occurred: ' . $e->getMessage(), null, 500);
+} finally {
+    if (isset($conn) && $conn) {
+        $conn->close();
+    }
 }
 
 // Validate DCM-Zone relationship and get names
@@ -82,12 +124,22 @@ function validateDcmZoneEndpoint($conn) {
 }
 
 // GET ALL LINES
-function listLines($conn, $ip_address, $user_agent) {
-    $sql = "SELECT l.*, c.cluster_name 
+function listLines($conn) {
+    // Handle pagination
+    $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
+    $limit = isset($_GET['limit']) ? max(1, intval($_GET['limit'])) : 100;
+    $offset = ($page - 1) * $limit;
+
+    $sql = "SELECT SQL_CALC_FOUND_ROWS l.*, c.cluster_name 
             FROM line l
             LEFT JOIN cluster c ON l.cluster_id = c.cluster_id
-            ORDER BY l.line_name";
-    $result = $conn->query($sql);
+            ORDER BY l.line_name
+            LIMIT ? OFFSET ?";
+    
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("ii", $limit, $offset);
+    $stmt->execute();
+    $result = $stmt->get_result();
     
     if (!$result) {
         sendResponse('error', 'Database error: ' . $conn->error, null, 500);
@@ -109,14 +161,23 @@ function listLines($conn, $ip_address, $user_agent) {
         ];
     }
 
-    sendResponse('success', 'Lines retrieved', $lines);
-    logAction('List lines', 'read', $ip_address, $user_agent, [
-        'count' => count($lines)
-    ]);
+    // Get total count
+    $total_result = $conn->query("SELECT FOUND_ROWS() AS total");
+    $total = $total_result->fetch_assoc()['total'];
+    $total_pages = ceil($total / $limit);
+
+    $meta = [
+        'page' => $page,
+        'limit' => $limit,
+        'total_items' => $total,
+        'total_pages' => $total_pages
+    ];
+
+    sendResponse('success', 'Lines retrieved', ['lines' => $lines, 'meta' => $meta]);
 }
 
 // GET SINGLE LINE
-function getLine($conn, $ip_address, $user_agent) {
+function getLine($conn) {
     $line_id = $_GET['line_id'] ?? null;
     
     if (!$line_id) {
@@ -139,9 +200,6 @@ function getLine($conn, $ip_address, $user_agent) {
 
     if ($result->num_rows === 0) {
         sendResponse('error', 'Line not found', null, 404);
-        logAction('Line not found', 'error', $ip_address, $user_agent, [
-            'line_id' => $line_id
-        ]);
         return;
     }
 
@@ -160,10 +218,9 @@ function getLine($conn, $ip_address, $user_agent) {
     ];
     
     sendResponse('success', 'Line retrieved', $response_data);
-    logAction('View line', 'read', $ip_address, $user_agent, $response_data);
 }
 
-function createLine($conn, $ip_address, $user_agent) {
+function createLine($conn) {
     $input = json_decode(file_get_contents("php://input"), true);
 
     // Validate required fields
@@ -175,12 +232,12 @@ function createLine($conn, $ip_address, $user_agent) {
     }
 
     // Extract values
-    $line_name = $input['line_name'];
-    $line_location = $input['line_location'] ?? null;
-    $line_pincode = $input['line_pincode'] ?? null;
-    $cluster_id = $input['cluster_id'];
-    $zone_id = $input['zone_id'];
-    $dcm_id = $input['dcm_id'];
+    $line_name = $conn->real_escape_string($input['line_name']);
+    $line_location = isset($input['line_location']) ? $conn->real_escape_string($input['line_location']) : null;
+    $line_pincode = isset($input['line_pincode']) ? $conn->real_escape_string($input['line_pincode']) : null;
+    $cluster_id = $conn->real_escape_string($input['cluster_id']);
+    $zone_id = $conn->real_escape_string($input['zone_id']);
+    $dcm_id = $conn->real_escape_string($input['dcm_id']);
 
     // Validate DCM-Zone relationship and get names
     $validation = validateDcmZoneRelationship($conn, $dcm_id, $zone_id);
@@ -261,26 +318,21 @@ function createLine($conn, $ip_address, $user_agent) {
         ];
         
         sendResponse('success', 'Line created', $response_data, 201);
-        logAction('Create line', 'create', $ip_address, $user_agent, $response_data);
 
     } catch (Exception $e) {
         $conn->rollback();
         sendResponse('error', $e->getMessage(), null, 500);
-        logAction('Create line failed', 'error', $ip_address, $user_agent, [
-            'error' => $e->getMessage(),
-            'input' => $input
-        ]);
     }
 }
 
-function updateLine($conn, $ip_address, $user_agent) {
+function updateLine($conn) {
     $input = json_decode(file_get_contents("php://input"), true);
 
     if (empty($input['line_id'])) {
         sendResponse('error', 'line_id is required', null, 400);
     }
 
-    $line_id = $input['line_id'];
+    $line_id = $conn->real_escape_string($input['line_id']);
     
     // Initialize variables
     $zone_name = null;
@@ -294,8 +346,8 @@ function updateLine($conn, $ip_address, $user_agent) {
         $current = $conn->query("SELECT zone_id, dcm_id FROM line WHERE line_id = '" . 
                               $conn->real_escape_string($line_id) . "'")->fetch_assoc();
         
-        $zone_id = isset($input['zone_id']) ? $input['zone_id'] : $current['zone_id'];
-        $dcm_id = isset($input['dcm_id']) ? $input['dcm_id'] : $current['dcm_id'];
+        $zone_id = isset($input['zone_id']) ? $conn->real_escape_string($input['zone_id']) : $current['zone_id'];
+        $dcm_id = isset($input['dcm_id']) ? $conn->real_escape_string($input['dcm_id']) : $current['dcm_id'];
         
         // Validate the relationship
         $validation = validateDcmZoneRelationship($conn, $dcm_id, $zone_id);
@@ -313,10 +365,10 @@ function updateLine($conn, $ip_address, $user_agent) {
     $types = "";
 
     // Extract all values into variables first
-    $line_name = isset($input['line_name']) ? $input['line_name'] : null;
-    $line_location = isset($input['line_location']) ? $input['line_location'] : null;
-    $line_pincode = isset($input['line_pincode']) ? $input['line_pincode'] : null;
-    $cluster_id = isset($input['cluster_id']) ? $input['cluster_id'] : null;
+    $line_name = isset($input['line_name']) ? $conn->real_escape_string($input['line_name']) : null;
+    $line_location = isset($input['line_location']) ? $conn->real_escape_string($input['line_location']) : null;
+    $line_pincode = isset($input['line_pincode']) ? $conn->real_escape_string($input['line_pincode']) : null;
+    $cluster_id = isset($input['cluster_id']) ? $conn->real_escape_string($input['cluster_id']) : null;
 
     if ($line_name !== null) {
         $updates[] = "line_name = ?";
@@ -401,71 +453,33 @@ function updateLine($conn, $ip_address, $user_agent) {
             ];
             
             sendResponse('success', 'Line updated', $response_data);
-            logAction('Update line', 'update', $ip_address, $user_agent, $response_data);
         } else {
             sendResponse('error', 'No changes made or line not found', null, 404);
         }
     } else {
         sendResponse('error', 'Update failed: ' . $stmt->error, null, 500);
-        logAction('Update line failed', 'error', $ip_address, $user_agent, [
-            'error' => $stmt->error,
-            'input' => $input
-        ]);
     }
 }
 
-function deleteLine($conn, $ip_address, $user_agent) {
+function deleteLine($conn) {
     $input = json_decode(file_get_contents("php://input"), true);
 
     if (empty($input['line_id'])) {
         sendResponse('error', 'line_id is required', null, 400);
     }
 
-    $line_id = $input['line_id'];
+    $line_id = $conn->real_escape_string($input['line_id']);
     $stmt = $conn->prepare("DELETE FROM line WHERE line_id = ?");
     $stmt->bind_param("s", $line_id);
 
     if ($stmt->execute()) {
         if ($stmt->affected_rows > 0) {
             sendResponse('success', 'Line deleted', ['line_id' => $line_id]);
-            logAction('Delete line', 'delete', $ip_address, $user_agent, [
-                'line_id' => $line_id
-            ]);
         } else {
             sendResponse('error', 'Line not found', null, 404);
         }
     } else {
         sendResponse('error', 'Deletion failed: ' . $stmt->error, null, 500);
-        logAction('Delete line failed', 'error', $ip_address, $user_agent, [
-            'error' => $stmt->error,
-            'input' => $input
-        ]);
     }
 }
-
-switch ($method) {
-    case 'POST': 
-        createLine($conn, $ip_address, $user_agent); 
-        break;
-    case 'GET':
-        if (isset($_GET['validate_dcm_zone'])) {
-            validateDcmZoneEndpoint($conn);
-        } else {
-            isset($_GET['line_id']) ? getLine($conn, $ip_address, $user_agent) : 
-            listLines($conn, $ip_address, $user_agent);
-        }
-        break;
-    case 'PUT': 
-        updateLine($conn, $ip_address, $user_agent); 
-        break;
-    case 'DELETE': 
-        deleteLine($conn, $ip_address, $user_agent); 
-        break;
-    default:
-        sendResponse('error', 'Invalid request method', null, 405);
-        logAction('Invalid method', 'error', $ip_address, $user_agent);
-        break;
-}
-
-$conn->close();
 ?>

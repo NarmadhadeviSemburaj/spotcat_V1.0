@@ -23,12 +23,6 @@ function sendResponse($status, $message, $data = null, $httpCode = 200) {
     exit;
 }
 
-// Logging helper
-function logAction($action, $type, $ip, $agent, $details = []) {
-    logUserAction(null, 'system', $type, $action, $_SERVER['REQUEST_URI'], 
-                 $_SERVER['REQUEST_METHOD'], $details, $ip, $agent);
-}
-
 // Validate DCM-Zone relationship and get names
 function validateDcmZoneRelationship($conn, $dcm_id, $zone_id) {
     $check_sql = "SELECT d.dcm_id, d.dcm_name, d.zone_id, z.zone_name 
@@ -66,6 +60,8 @@ function validateDcmZoneRelationship($conn, $dcm_id, $zone_id) {
 }
 
 function validateDcmZoneEndpoint($conn) {
+    global $ip_address, $user_agent;
+    
     $dcm_id = $_GET['dcm_id'] ?? null;
     $zone_id = $_GET['zone_id'] ?? null;
     
@@ -75,8 +71,10 @@ function validateDcmZoneEndpoint($conn) {
     
     $validation = validateDcmZoneRelationship($conn, $dcm_id, $zone_id);
     if ($validation['valid']) {
+        logUserAction(null, 'System', 'Validation', 'DCM-Zone validation successful', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'success', $validation['data'], $ip_address, $user_agent);
         sendResponse('success', 'Valid DCM-Zone relationship', $validation['data']);
     } else {
+        logUserAction(null, 'System', 'Validation', 'DCM-Zone validation failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'error', ['message' => $validation['message']], $ip_address, $user_agent);
         sendResponse('error', $validation['message'], null, 400);
     }
 }
@@ -88,6 +86,7 @@ function createCluster($conn, $ip_address, $user_agent) {
     $required = ['clusters_name', 'cluster_id', 'zone_id', 'dcm_id'];
     foreach ($required as $field) {
         if (empty($input[$field])) {
+            logUserAction(null, 'System', 'Create Cluster', 'Missing required field: ' . $field, $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
             sendResponse('error', "$field is required", null, 400);
         }
     }
@@ -103,6 +102,7 @@ function createCluster($conn, $ip_address, $user_agent) {
     // Validate DCM-Zone relationship and get names
     $validation = validateDcmZoneRelationship($conn, $dcm_id, $zone_id);
     if (!$validation['valid']) {
+        logUserAction(null, 'System', 'Create Cluster', 'DCM-Zone validation failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['message' => $validation['message']], $ip_address, $user_agent);
         sendResponse('error', $validation['message'], null, 400);
     }
 
@@ -178,16 +178,13 @@ function createCluster($conn, $ip_address, $user_agent) {
             'dcm_name' => $cluster['dcm_name']
         ];
         
+        logUserAction(null, 'System', 'Create Cluster', 'Cluster created successfully', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'success', $response_data, $ip_address, $user_agent);
         sendResponse('success', 'Cluster created', $response_data, 201);
-        logAction('Create cluster', 'create', $ip_address, $user_agent, $response_data);
 
     } catch (Exception $e) {
         $conn->rollback();
+        logUserAction(null, 'System', 'Create Cluster', 'Cluster creation failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['error' => $e->getMessage()], $ip_address, $user_agent);
         sendResponse('error', $e->getMessage(), null, 500);
-        logAction('Create cluster failed', 'error', $ip_address, $user_agent, [
-            'error' => $e->getMessage(),
-            'input' => $input
-        ]);
     }
 }
 
@@ -199,6 +196,7 @@ function listClusters($conn, $ip_address, $user_agent) {
     $result = $conn->query($sql);
     
     if (!$result) {
+        logUserAction(null, 'System', 'List Clusters', 'Database error', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], null, 'error', ['error' => $conn->error], $ip_address, $user_agent);
         sendResponse('error', 'Database error: ' . $conn->error, null, 500);
     }
 
@@ -218,16 +216,15 @@ function listClusters($conn, $ip_address, $user_agent) {
         ];
     }
 
+    logUserAction(null, 'System', 'List Clusters', 'Retrieved clusters list', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], null, 'success', ['count' => count($clusters)], $ip_address, $user_agent);
     sendResponse('success', 'Clusters retrieved', $clusters);
-    logAction('List clusters', 'read', $ip_address, $user_agent, [
-        'count' => count($clusters)
-    ]);
 }
 
 function getCluster($conn, $ip_address, $user_agent) {
     $clusters_id = $_GET['clusters_id'] ?? null;
     
     if (!$clusters_id) {
+        logUserAction(null, 'System', 'Get Cluster', 'Missing clusters_id parameter', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'error', null, $ip_address, $user_agent);
         sendResponse('error', 'clusters_id parameter is required', null, 400);
     }
 
@@ -238,6 +235,7 @@ function getCluster($conn, $ip_address, $user_agent) {
     $stmt = $conn->prepare($sql);
     
     if (!$stmt) {
+        logUserAction(null, 'System', 'Get Cluster', 'Database preparation failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'error', ['error' => $conn->error], $ip_address, $user_agent);
         sendResponse('error', 'Database preparation failed: ' . $conn->error, null, 500);
     }
 
@@ -246,10 +244,8 @@ function getCluster($conn, $ip_address, $user_agent) {
     $result = $stmt->get_result();
 
     if ($result->num_rows === 0) {
+        logUserAction(null, 'System', 'Get Cluster', 'Cluster not found', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'error', ['clusters_id' => $clusters_id], $ip_address, $user_agent);
         sendResponse('error', 'Cluster not found', null, 404);
-        logAction('Cluster not found', 'error', $ip_address, $user_agent, [
-            'clusters_id' => $clusters_id
-        ]);
         return;
     }
 
@@ -267,14 +263,15 @@ function getCluster($conn, $ip_address, $user_agent) {
         'dcm_name' => $cluster['dcm_name']
     ];
     
+    logUserAction(null, 'System', 'Get Cluster', 'Retrieved cluster details', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $_GET, 'success', $response_data, $ip_address, $user_agent);
     sendResponse('success', 'Cluster retrieved', $response_data);
-    logAction('View cluster', 'read', $ip_address, $user_agent, $response_data);
 }
 
 function updateCluster($conn, $ip_address, $user_agent) {
     $input = json_decode(file_get_contents("php://input"), true);
 
     if (empty($input['clusters_id'])) {
+        logUserAction(null, 'System', 'Update Cluster', 'Missing clusters_id', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
         sendResponse('error', 'clusters_id is required', null, 400);
     }
 
@@ -298,6 +295,7 @@ function updateCluster($conn, $ip_address, $user_agent) {
         // Validate the relationship
         $validation = validateDcmZoneRelationship($conn, $dcm_id, $zone_id);
         if (!$validation['valid']) {
+            logUserAction(null, 'System', 'Update Cluster', 'DCM-Zone validation failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['message' => $validation['message']], $ip_address, $user_agent);
             sendResponse('error', $validation['message'], null, 400);
         }
         
@@ -358,6 +356,7 @@ function updateCluster($conn, $ip_address, $user_agent) {
     }
 
     if (empty($updates)) {
+        logUserAction(null, 'System', 'Update Cluster', 'No fields to update', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
         sendResponse('error', 'No fields to update', null, 400);
     }
 
@@ -369,6 +368,7 @@ function updateCluster($conn, $ip_address, $user_agent) {
     $stmt = $conn->prepare($sql);
     
     if (!$stmt) {
+        logUserAction(null, 'System', 'Update Cluster', 'Database error', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['error' => $conn->error], $ip_address, $user_agent);
         sendResponse('error', 'Database error: ' . $conn->error, null, 500);
     }
     
@@ -398,17 +398,15 @@ function updateCluster($conn, $ip_address, $user_agent) {
                 'dcm_name' => $cluster['dcm_name']
             ];
             
+            logUserAction(null, 'System', 'Update Cluster', 'Cluster updated successfully', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'success', $response_data, $ip_address, $user_agent);
             sendResponse('success', 'Cluster updated', $response_data);
-            logAction('Update cluster', 'update', $ip_address, $user_agent, $response_data);
         } else {
+            logUserAction(null, 'System', 'Update Cluster', 'No changes made or cluster not found', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
             sendResponse('error', 'No changes made or cluster not found', null, 404);
         }
     } else {
+        logUserAction(null, 'System', 'Update Cluster', 'Update failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['error' => $stmt->error], $ip_address, $user_agent);
         sendResponse('error', 'Update failed: ' . $stmt->error, null, 500);
-        logAction('Update cluster failed', 'error', $ip_address, $user_agent, [
-            'error' => $stmt->error,
-            'input' => $input
-        ]);
     }
 }
 
@@ -416,6 +414,7 @@ function deleteCluster($conn, $ip_address, $user_agent) {
     $input = json_decode(file_get_contents("php://input"), true);
 
     if (empty($input['clusters_id'])) {
+        logUserAction(null, 'System', 'Delete Cluster', 'Missing clusters_id', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
         sendResponse('error', 'clusters_id is required', null, 400);
     }
 
@@ -425,19 +424,15 @@ function deleteCluster($conn, $ip_address, $user_agent) {
 
     if ($stmt->execute()) {
         if ($stmt->affected_rows > 0) {
+            logUserAction(null, 'System', 'Delete Cluster', 'Cluster deleted successfully', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'success', ['clusters_id' => $clusters_id], $ip_address, $user_agent);
             sendResponse('success', 'Cluster deleted', ['clusters_id' => $clusters_id]);
-            logAction('Delete cluster', 'delete', $ip_address, $user_agent, [
-                'clusters_id' => $clusters_id
-            ]);
         } else {
+            logUserAction(null, 'System', 'Delete Cluster', 'Cluster not found', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', null, $ip_address, $user_agent);
             sendResponse('error', 'Cluster not found', null, 404);
         }
     } else {
+        logUserAction(null, 'System', 'Delete Cluster', 'Deletion failed', $_SERVER['REQUEST_URI'], $_SERVER['REQUEST_METHOD'], $input, 'error', ['error' => $stmt->error], $ip_address, $user_agent);
         sendResponse('error', 'Deletion failed: ' . $stmt->error, null, 500);
-        logAction('Delete cluster failed', 'error', $ip_address, $user_agent, [
-            'error' => $stmt->error,
-            'input' => $input
-        ]);
     }
 }
 
@@ -460,8 +455,8 @@ switch ($method) {
         deleteCluster($conn, $ip_address, $user_agent); 
         break;
     default:
+        logUserAction(null, 'System', 'Invalid Method', 'Invalid request method', $_SERVER['REQUEST_URI'], $method, null, 'error', null, $ip_address, $user_agent);
         sendResponse('error', 'Invalid request method', null, 405);
-        logAction('Invalid method', 'error', $ip_address, $user_agent);
         break;
 }
 
