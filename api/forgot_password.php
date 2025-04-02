@@ -94,8 +94,8 @@ log_message("Accessed forgot password page");
             </div>
             <button type="submit" class="btn btn-primary w-100 py-2 mb-3">Send Reset Link</button>
             <div class="text-center">
-                <a href="index.php" class="text-decoration-none">Back to Login</a>
-            </div>
+				<a href="../index.php" class="text-decoration-none">Back to Login</a>
+			</div>
         </form>
     </div>
 </div>
